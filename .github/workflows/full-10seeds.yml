@@ -4,9 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       max_tasks:
-        description: "OpenML tasks to run per seed"
+        description: "OpenML tasks to run when task_ids is empty; use 0 for the full suite"
         required: true
         default: "72"
+      suite_id:
+        description: "OpenML benchmark suite id"
+        required: true
+        default: "99"
+      task_ids:
+        description: "Optional task IDs to run, as comma-separated values or a JSON array"
+        required: false
+        default: ""
       n_explain:
         description: "Explained test instances per task"
         required: true
@@ -28,14 +36,72 @@ permissions:
   contents: read
 
 jobs:
-  seed:
-    name: Seed ${{ matrix.seed }}
+  prepare-tasks:
+    name: Prepare task matrix
     runs-on: ubuntu-latest
+    outputs:
+      tasks: ${{ steps.tasks.outputs.tasks }}
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Install OpenML client
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install openml
+
+      - name: Resolve OpenML task IDs
+        id: tasks
+        env:
+          SUITE_ID: ${{ inputs.suite_id }}
+          MAX_TASKS: ${{ inputs.max_tasks }}
+          TASK_IDS: ${{ inputs.task_ids }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          def parse_task_ids(text):
+              text = (text or "").strip()
+              if not text:
+                  return None
+              if text.startswith("["):
+                  return [int(value) for value in json.loads(text)]
+              return [int(part.strip()) for part in text.split(",") if part.strip()]
+
+          task_ids = parse_task_ids(os.environ.get("TASK_IDS"))
+          if task_ids is None:
+              import openml
+
+              suite_id = int(os.environ["SUITE_ID"])
+              max_tasks = int(os.environ["MAX_TASKS"])
+              suite = openml.study.get_suite(suite_id)
+              task_ids = [int(task_id) for task_id in suite.tasks]
+              if max_tasks > 0:
+                  task_ids = task_ids[:max_tasks]
+
+          if not task_ids:
+              raise SystemExit("No OpenML task IDs were resolved.")
+
+          tasks_json = json.dumps(task_ids)
+          print(f"Resolved {len(task_ids)} task(s): {tasks_json}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"tasks={tasks_json}", file=output)
+          PY
+
+  task:
+    name: Task ${{ matrix.task_id }}
+    runs-on: ubuntu-latest
+    needs: prepare-tasks
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        seed: ${{ fromJSON(inputs.seeds) }}
+        task_id: ${{ fromJSON(needs.prepare-tasks.outputs.tasks) }}
 
     steps:
       - name: Check out repository
@@ -60,40 +126,84 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Run OpenML seed
+      - name: Run OpenML task for each seed
         env:
           PYTHONUNBUFFERED: "1"
+          TASK_ID: ${{ matrix.task_id }}
+          SEEDS: ${{ inputs.seeds }}
+          SUITE_ID: ${{ inputs.suite_id }}
+          N_EXPLAIN: ${{ inputs.n_explain }}
+          N_VAL_SELECT: ${{ inputs.n_val_select }}
+          METHODS: ${{ inputs.methods }}
         run: |
-          python scripts/run_full_seed.py \
-            --seed "${{ matrix.seed }}" \
-            --max-tasks "${{ inputs.max_tasks }}" \
-            --n-explain "${{ inputs.n_explain }}" \
-            --n-val-select "${{ inputs.n_val_select }}" \
-            --methods "${{ inputs.methods }}"
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
 
-      - name: Stage seed artifact
+          task_id = int(os.environ["TASK_ID"])
+          seeds = [int(seed) for seed in json.loads(os.environ["SEEDS"])]
+
+          for seed in seeds:
+              cmd = [
+                  sys.executable,
+                  "scripts/run_full_seed.py",
+                  "--seed",
+                  str(seed),
+                  "--suite-id",
+                  os.environ["SUITE_ID"],
+                  "--task-id",
+                  str(task_id),
+                  "--n-explain",
+                  os.environ["N_EXPLAIN"],
+                  "--n-val-select",
+                  os.environ["N_VAL_SELECT"],
+                  "--methods",
+                  os.environ["METHODS"],
+              ]
+              print(" ".join(cmd), flush=True)
+              raise_code = subprocess.call(cmd)
+              if raise_code:
+                  raise SystemExit(raise_code)
+          PY
+
+      - name: Stage task artifact
         if: always()
+        env:
+          TASK_ID: ${{ matrix.task_id }}
+          SEEDS: ${{ inputs.seeds }}
+          N_EXPLAIN: ${{ inputs.n_explain }}
         run: |
           mkdir -p ci_artifacts
-          result_dir="results_recomputed/experimental_outputs_aime_full_n${{ inputs.n_explain }}_seed${{ matrix.seed }}"
-          if [ -d "$result_dir" ]; then
-            cp -R "$result_dir" ci_artifacts/
-          else
-            echo "No result directory found at $result_dir"
-          fi
+          seeds="$(python - <<'PY'
+          import json
+          import os
 
-      - name: Upload seed results
+          print(" ".join(str(int(seed)) for seed in json.loads(os.environ["SEEDS"])))
+          PY
+          )"
+          for seed in $seeds; do
+            result_dir="results_recomputed/experimental_outputs_aime_full_n${N_EXPLAIN}_seed${seed}_task${TASK_ID}"
+            if [ -d "$result_dir" ]; then
+              cp -R "$result_dir" ci_artifacts/
+            else
+              echo "No result directory found at $result_dir"
+            fi
+          done
+
+      - name: Upload task results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fpde-openml-seed-${{ matrix.seed }}
+          name: fpde-openml-task-${{ matrix.task_id }}
           path: ci_artifacts/
           retention-days: 14
 
   aggregate:
     name: Aggregate completed seeds
     runs-on: ubuntu-latest
-    needs: seed
+    needs: task
     if: always()
 
     steps:
@@ -111,10 +221,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pandas numpy scipy tabulate jinja2
 
-      - name: Download seed artifacts
+      - name: Download task artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: fpde-openml-seed-*
+          pattern: fpde-openml-task-*
           path: results_recomputed
           merge-multiple: true
 

@@ -1,0 +1,19 @@
+# Core dependencies for reproducing the FPDE OpenML-CC18 experiments
+numpy
+pandas
+tabulate
+jinja2
+scikit-learn
+lightgbm
+openml
+
+# Baseline explainers used in the manuscript experiments
+shap
+lime
+aime-xai
+umap-learn
+seaborn
+
+# Utility dependencies often pulled by the above packages
+scipy
+matplotlib

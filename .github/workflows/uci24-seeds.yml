@@ -88,7 +88,7 @@ jobs:
           dataset_ids = parse_ids(os.environ.get("UCI_IDS"))
           if dataset_ids is None:
               csv_path = Path("code/uci_cc18_like_final_base_candidates_24_no_openml_cc18_duplicates.csv")
-              with csv_path.open(newline="", encoding="utf-8") as fh:
+              with csv_path.open(newline="", encoding="utf-8-sig") as fh:
                   dataset_ids = [int(row["uci_id"]) for row in csv.DictReader(fh)]
               max_tasks = int(os.environ["MAX_TASKS"])
               if max_tasks > 0:

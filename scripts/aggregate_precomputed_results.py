@@ -20,6 +20,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Aggregate FPDE per-instance result folders.")
     parser.add_argument("--results-dir", type=Path, default=Path("results_precomputed"))
     parser.add_argument("--out-dir", type=Path, default=None)
+    parser.add_argument(
+        "--glob-pattern",
+        default="experimental_outputs_aime_full_n*_seed*",
+        help="Directory glob under results-dir to aggregate.",
+    )
     args = parser.parse_args()
 
     results = args.results_dir if args.results_dir.is_absolute() else ROOT / args.results_dir
@@ -29,7 +34,7 @@ def main() -> None:
 
     parts = []
     configs = []
-    for d in sorted(results.glob("experimental_outputs_aime_full_n*_seed*")):
+    for d in sorted(results.glob(args.glob_pattern)):
         cfg_path = d / "run_config.json"
         seed = None
         if cfg_path.exists():

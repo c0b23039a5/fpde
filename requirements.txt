@@ -6,6 +6,7 @@ jinja2
 scikit-learn
 lightgbm
 openml
+ucimlrepo
 
 # Baseline explainers used in the manuscript experiments
 shap

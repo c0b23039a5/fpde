@@ -1,0 +1,490 @@
+name: Full seed UCI 24 run
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_tasks:
+        description: "UCI datasets to run when uci_ids is empty; use 0 for all retained datasets"
+        required: true
+        default: "24"
+      uci_ids:
+        description: "Optional UCI dataset IDs to run, as comma-separated values or a JSON array"
+        required: false
+        default: ""
+      test_size:
+        description: "Stratified held-out test fraction"
+        required: true
+        default: "0.2"
+      n_explain:
+        description: "Explained test instances per dataset"
+        required: true
+        default: "200"
+      n_val_select:
+        description: "Validation instances for Hyb-FPDE-grid lambda selection"
+        required: true
+        default: "200"
+      max_train_rows:
+        description: "Optional train cap; use 0 for no cap"
+        required: true
+        default: "0"
+      max_test_rows:
+        description: "Optional test cap; use 0 for no cap"
+        required: true
+        default: "0"
+      methods:
+        description: "Comma-separated methods"
+        required: true
+        default: "diff_fpde,cos_fpde,hyb_fpde_grid,shap,lime,aime"
+      seeds:
+        description: "JSON array of seeds"
+        required: true
+        default: "[0,1,2,3,4,5,6,7,8,9]"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-datasets:
+    name: Prepare UCI dataset seed matrices
+    runs-on: ubuntu-latest
+    outputs:
+      datasets: ${{ steps.datasets.outputs.datasets }}
+      matrix_0: ${{ steps.datasets.outputs.matrix_0 }}
+      matrix_1: ${{ steps.datasets.outputs.matrix_1 }}
+      matrix_2: ${{ steps.datasets.outputs.matrix_2 }}
+      matrix_3: ${{ steps.datasets.outputs.matrix_3 }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Resolve UCI dataset IDs
+        id: datasets
+        env:
+          MAX_TASKS: ${{ inputs.max_tasks }}
+          UCI_IDS: ${{ inputs.uci_ids }}
+          SEEDS: ${{ inputs.seeds }}
+        run: |
+          python - <<'PY'
+          import csv
+          import json
+          import os
+          from pathlib import Path
+
+          def parse_ids(text):
+              text = (text or "").strip()
+              if not text:
+                  return None
+              if text.startswith("["):
+                  return [int(value) for value in json.loads(text)]
+              return [int(part.strip()) for part in text.split(",") if part.strip()]
+
+          dataset_ids = parse_ids(os.environ.get("UCI_IDS"))
+          if dataset_ids is None:
+              csv_path = Path("code/uci_cc18_like_final_base_candidates_24_no_openml_cc18_duplicates.csv")
+              with csv_path.open(newline="", encoding="utf-8") as fh:
+                  dataset_ids = [int(row["uci_id"]) for row in csv.DictReader(fh)]
+              max_tasks = int(os.environ["MAX_TASKS"])
+              if max_tasks > 0:
+                  dataset_ids = dataset_ids[:max_tasks]
+
+          if not dataset_ids:
+              raise SystemExit("No UCI dataset IDs were resolved.")
+
+          seeds = [int(seed) for seed in json.loads(os.environ["SEEDS"])]
+          if not seeds:
+              raise SystemExit("No seeds were resolved.")
+
+          pairs = [{"uci_id": uci_id, "seed": seed} for uci_id in dataset_ids for seed in seeds]
+          chunk_size = 256
+          max_chunks = 4
+          chunks = [pairs[i:i + chunk_size] for i in range(0, len(pairs), chunk_size)]
+          if len(chunks) > max_chunks:
+              raise SystemExit(
+                  f"Resolved {len(pairs)} dataset/seed pairs, but this workflow supports "
+                  f"up to {chunk_size * max_chunks}. Reduce uci_ids or seeds, or add more chunks."
+              )
+          while len(chunks) < max_chunks:
+              chunks.append([])
+
+          datasets_json = json.dumps(dataset_ids)
+          print(f"Resolved {len(dataset_ids)} UCI dataset(s): {datasets_json}")
+          print(f"Resolved {len(seeds)} seed(s): {json.dumps(seeds)}")
+          print(f"Prepared {len(pairs)} dataset/seed pair(s) across {sum(bool(c) for c in chunks)} matrix chunk(s).")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"datasets={datasets_json}", file=output)
+              for index, chunk in enumerate(chunks):
+                  print(f"matrix_{index}={json.dumps(chunk)}", file=output)
+          PY
+
+  dataset-seed-0:
+    name: UCI ${{ matrix.uci_id }} seed ${{ matrix.seed }}
+    runs-on: ubuntu-latest
+    needs: prepare-datasets
+    if: ${{ needs.prepare-datasets.outputs.matrix_0 != '[]' }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare-datasets.outputs.matrix_0) }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Cache UCI data
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ucimlrepo
+          key: uci24-${{ runner.os }}-${{ matrix.uci_id }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            uci24-${{ runner.os }}-${{ matrix.uci_id }}-
+            uci24-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run UCI dataset seed
+        env:
+          PYTHONUNBUFFERED: "1"
+          UCI_ID: ${{ matrix.uci_id }}
+          SEED: ${{ matrix.seed }}
+          TEST_SIZE: ${{ inputs.test_size }}
+          N_EXPLAIN: ${{ inputs.n_explain }}
+          N_VAL_SELECT: ${{ inputs.n_val_select }}
+          MAX_TRAIN_ROWS: ${{ inputs.max_train_rows }}
+          MAX_TEST_ROWS: ${{ inputs.max_test_rows }}
+          METHODS: ${{ inputs.methods }}
+        run: |
+          python scripts/run_uci24_seed.py \
+            --seed "$SEED" \
+            --uci-ids "$UCI_ID" \
+            --test-size "$TEST_SIZE" \
+            --n-explain "$N_EXPLAIN" \
+            --n-val-select "$N_VAL_SELECT" \
+            --max-train-rows "$MAX_TRAIN_ROWS" \
+            --max-test-rows "$MAX_TEST_ROWS" \
+            --methods "$METHODS"
+
+      - name: Stage dataset seed artifact
+        if: always()
+        env:
+          UCI_ID: ${{ matrix.uci_id }}
+          SEED: ${{ matrix.seed }}
+          N_EXPLAIN: ${{ inputs.n_explain }}
+        run: |
+          mkdir -p ci_artifacts
+          result_dir="results_uci24/experimental_outputs_uci24_full_n${N_EXPLAIN}_seed${SEED}_uci${UCI_ID}"
+          if [ -d "$result_dir" ]; then
+            cp -R "$result_dir" ci_artifacts/
+          else
+            echo "No result directory found at $result_dir"
+          fi
+
+      - name: Upload dataset seed results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fpde-uci24-dataset-${{ matrix.uci_id }}-seed-${{ matrix.seed }}
+          path: ci_artifacts/
+          retention-days: 14
+
+  dataset-seed-1:
+    name: UCI ${{ matrix.uci_id }} seed ${{ matrix.seed }}
+    runs-on: ubuntu-latest
+    needs: prepare-datasets
+    if: ${{ needs.prepare-datasets.outputs.matrix_1 != '[]' }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare-datasets.outputs.matrix_1) }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Cache UCI data
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ucimlrepo
+          key: uci24-${{ runner.os }}-${{ matrix.uci_id }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            uci24-${{ runner.os }}-${{ matrix.uci_id }}-
+            uci24-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run UCI dataset seed
+        env:
+          PYTHONUNBUFFERED: "1"
+          UCI_ID: ${{ matrix.uci_id }}
+          SEED: ${{ matrix.seed }}
+          TEST_SIZE: ${{ inputs.test_size }}
+          N_EXPLAIN: ${{ inputs.n_explain }}
+          N_VAL_SELECT: ${{ inputs.n_val_select }}
+          MAX_TRAIN_ROWS: ${{ inputs.max_train_rows }}
+          MAX_TEST_ROWS: ${{ inputs.max_test_rows }}
+          METHODS: ${{ inputs.methods }}
+        run: |
+          python scripts/run_uci24_seed.py \
+            --seed "$SEED" \
+            --uci-ids "$UCI_ID" \
+            --test-size "$TEST_SIZE" \
+            --n-explain "$N_EXPLAIN" \
+            --n-val-select "$N_VAL_SELECT" \
+            --max-train-rows "$MAX_TRAIN_ROWS" \
+            --max-test-rows "$MAX_TEST_ROWS" \
+            --methods "$METHODS"
+
+      - name: Stage dataset seed artifact
+        if: always()
+        env:
+          UCI_ID: ${{ matrix.uci_id }}
+          SEED: ${{ matrix.seed }}
+          N_EXPLAIN: ${{ inputs.n_explain }}
+        run: |
+          mkdir -p ci_artifacts
+          result_dir="results_uci24/experimental_outputs_uci24_full_n${N_EXPLAIN}_seed${SEED}_uci${UCI_ID}"
+          if [ -d "$result_dir" ]; then
+            cp -R "$result_dir" ci_artifacts/
+          else
+            echo "No result directory found at $result_dir"
+          fi
+
+      - name: Upload dataset seed results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fpde-uci24-dataset-${{ matrix.uci_id }}-seed-${{ matrix.seed }}
+          path: ci_artifacts/
+          retention-days: 14
+
+  dataset-seed-2:
+    name: UCI ${{ matrix.uci_id }} seed ${{ matrix.seed }}
+    runs-on: ubuntu-latest
+    needs: prepare-datasets
+    if: ${{ needs.prepare-datasets.outputs.matrix_2 != '[]' }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare-datasets.outputs.matrix_2) }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Cache UCI data
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ucimlrepo
+          key: uci24-${{ runner.os }}-${{ matrix.uci_id }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            uci24-${{ runner.os }}-${{ matrix.uci_id }}-
+            uci24-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run UCI dataset seed
+        env:
+          PYTHONUNBUFFERED: "1"
+          UCI_ID: ${{ matrix.uci_id }}
+          SEED: ${{ matrix.seed }}
+          TEST_SIZE: ${{ inputs.test_size }}
+          N_EXPLAIN: ${{ inputs.n_explain }}
+          N_VAL_SELECT: ${{ inputs.n_val_select }}
+          MAX_TRAIN_ROWS: ${{ inputs.max_train_rows }}
+          MAX_TEST_ROWS: ${{ inputs.max_test_rows }}
+          METHODS: ${{ inputs.methods }}
+        run: |
+          python scripts/run_uci24_seed.py \
+            --seed "$SEED" \
+            --uci-ids "$UCI_ID" \
+            --test-size "$TEST_SIZE" \
+            --n-explain "$N_EXPLAIN" \
+            --n-val-select "$N_VAL_SELECT" \
+            --max-train-rows "$MAX_TRAIN_ROWS" \
+            --max-test-rows "$MAX_TEST_ROWS" \
+            --methods "$METHODS"
+
+      - name: Stage dataset seed artifact
+        if: always()
+        env:
+          UCI_ID: ${{ matrix.uci_id }}
+          SEED: ${{ matrix.seed }}
+          N_EXPLAIN: ${{ inputs.n_explain }}
+        run: |
+          mkdir -p ci_artifacts
+          result_dir="results_uci24/experimental_outputs_uci24_full_n${N_EXPLAIN}_seed${SEED}_uci${UCI_ID}"
+          if [ -d "$result_dir" ]; then
+            cp -R "$result_dir" ci_artifacts/
+          else
+            echo "No result directory found at $result_dir"
+          fi
+
+      - name: Upload dataset seed results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fpde-uci24-dataset-${{ matrix.uci_id }}-seed-${{ matrix.seed }}
+          path: ci_artifacts/
+          retention-days: 14
+
+  dataset-seed-3:
+    name: UCI ${{ matrix.uci_id }} seed ${{ matrix.seed }}
+    runs-on: ubuntu-latest
+    needs: prepare-datasets
+    if: ${{ needs.prepare-datasets.outputs.matrix_3 != '[]' }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare-datasets.outputs.matrix_3) }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Cache UCI data
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ucimlrepo
+          key: uci24-${{ runner.os }}-${{ matrix.uci_id }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            uci24-${{ runner.os }}-${{ matrix.uci_id }}-
+            uci24-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run UCI dataset seed
+        env:
+          PYTHONUNBUFFERED: "1"
+          UCI_ID: ${{ matrix.uci_id }}
+          SEED: ${{ matrix.seed }}
+          TEST_SIZE: ${{ inputs.test_size }}
+          N_EXPLAIN: ${{ inputs.n_explain }}
+          N_VAL_SELECT: ${{ inputs.n_val_select }}
+          MAX_TRAIN_ROWS: ${{ inputs.max_train_rows }}
+          MAX_TEST_ROWS: ${{ inputs.max_test_rows }}
+          METHODS: ${{ inputs.methods }}
+        run: |
+          python scripts/run_uci24_seed.py \
+            --seed "$SEED" \
+            --uci-ids "$UCI_ID" \
+            --test-size "$TEST_SIZE" \
+            --n-explain "$N_EXPLAIN" \
+            --n-val-select "$N_VAL_SELECT" \
+            --max-train-rows "$MAX_TRAIN_ROWS" \
+            --max-test-rows "$MAX_TEST_ROWS" \
+            --methods "$METHODS"
+
+      - name: Stage dataset seed artifact
+        if: always()
+        env:
+          UCI_ID: ${{ matrix.uci_id }}
+          SEED: ${{ matrix.seed }}
+          N_EXPLAIN: ${{ inputs.n_explain }}
+        run: |
+          mkdir -p ci_artifacts
+          result_dir="results_uci24/experimental_outputs_uci24_full_n${N_EXPLAIN}_seed${SEED}_uci${UCI_ID}"
+          if [ -d "$result_dir" ]; then
+            cp -R "$result_dir" ci_artifacts/
+          else
+            echo "No result directory found at $result_dir"
+          fi
+
+      - name: Upload dataset seed results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fpde-uci24-dataset-${{ matrix.uci_id }}-seed-${{ matrix.seed }}
+          path: ci_artifacts/
+          retention-days: 14
+
+  aggregate:
+    name: Aggregate completed UCI 24 seeds
+    runs-on: ubuntu-latest
+    needs:
+      - dataset-seed-0
+      - dataset-seed-1
+      - dataset-seed-2
+      - dataset-seed-3
+    if: always()
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Install aggregation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas numpy scipy tabulate jinja2
+
+      - name: Download dataset seed artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: fpde-uci24-dataset-*-seed-*
+          path: results_uci24
+          merge-multiple: true
+
+      - name: Aggregate completed UCI 24 seeds
+        run: |
+          python scripts/aggregate_precomputed_results.py \
+            --results-dir results_uci24 \
+            --glob-pattern 'experimental_outputs_uci24_full_n*_seed*' \
+            --out-dir results_uci24/aggregate_10seeds
+
+      - name: Upload aggregate summary
+        uses: actions/upload-artifact@v7
+        with:
+          name: fpde-uci24-aggregate-10seeds
+          path: results_uci24/aggregate_10seeds/
+          retention-days: 14

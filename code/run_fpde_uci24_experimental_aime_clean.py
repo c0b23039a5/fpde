@@ -158,6 +158,16 @@ def unique_feature_columns(X: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def normalize_uci_feature_dtypes(X: pd.DataFrame) -> pd.DataFrame:
+    """Normalize UCI extension/string dtypes for the shared OpenML preprocessor."""
+    out = X.copy()
+    for col in out.columns:
+        if pd.api.types.is_bool_dtype(out[col]) or pd.api.types.is_numeric_dtype(out[col]):
+            continue
+        out[col] = out[col].astype(object)
+    return out
+
+
 def find_column_case_insensitive(columns: Sequence[Any], target: Any) -> Optional[Any]:
     if target is None or (isinstance(target, float) and np.isnan(target)):
         return None
@@ -219,6 +229,7 @@ def fetch_uci_dataframe(candidate_row: pd.Series) -> Tuple[pd.DataFrame, pd.Seri
     if X is None or y is None:
         raise ValueError("features or targets missing from ucimlrepo result")
     X_df = unique_feature_columns(X if isinstance(X, pd.DataFrame) else pd.DataFrame(X))
+    X_df = normalize_uci_feature_dtypes(X_df)
     y_df = y if isinstance(y, pd.DataFrame) else pd.DataFrame(y)
     if y_df.shape[1] == 0:
         raise ValueError("target table has no columns")

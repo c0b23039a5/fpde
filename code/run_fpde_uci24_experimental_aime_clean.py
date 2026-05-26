@@ -56,6 +56,7 @@ DEFAULT_UCI_IDS = [
 METHODS_DEFAULT = ("hyb_fpde_grid", "aime", "shap", "lime")
 FRACTIONS_DEFAULT = "0,0.05,0.1,0.2,0.3,0.5,0.7,1.0"
 LAMBDA_GRID_DEFAULT = "0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0"
+FPDE_WHEEL_DEFAULT = "fpde_xai-0.1.0-py3-none-any.whl"
 
 
 @dataclass
@@ -534,7 +535,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--fractions", type=str, default=FRACTIONS_DEFAULT)
     p.add_argument("--methods", type=str, default=",".join(METHODS_DEFAULT), help="Comma-separated method names.")
     p.add_argument("--output-dir", type=str, default="experimental_outputs_uci24")
-    p.add_argument("--fpde-path", type=str, default="FPDE.py", help="Path to FPDE.py. Put it next to this runner or pass an absolute path.")
+    p.add_argument(
+        "--fpde-path",
+        type=str,
+        default=FPDE_WHEEL_DEFAULT,
+        help="Path to the fpde-xai wheel or a legacy FPDE.py module. Relative paths are resolved from the current directory or this runner's directory.",
+    )
     p.add_argument(
         "--base-runner-path",
         type=str,

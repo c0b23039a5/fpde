@@ -30,6 +30,7 @@ all reported values from the actual run.
 from __future__ import annotations
 
 import argparse
+import importlib
 import importlib.util
 import json
 import math
@@ -72,6 +73,7 @@ METHODS_DEFAULT = (
 
 FRACTIONS_DEFAULT = "0,0.05,0.1,0.2,0.3,0.5,0.7,1.0"
 LAMBDA_GRID_DEFAULT = "0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0"
+FPDE_WHEEL_DEFAULT = "fpde_xai-0.1.0-py3-none-any.whl"
 
 
 @dataclass
@@ -129,17 +131,90 @@ def parse_int_list_or_none(text: Optional[str]) -> Optional[List[int]]:
     return out or None
 
 
+def _add_fpde_runner_compat(fpde: Any) -> Any:
+    if not hasattr(fpde, "select_lambda_by_deletion_insertion_validation") and hasattr(fpde, "FPDEEngine"):
+        def select_lambda_by_deletion_insertion_validation(
+            X_train: np.ndarray,
+            y_train: Sequence[Any],
+            X_val: np.ndarray,
+            model: Any,
+            *,
+            lambda_hyb_grid: Sequence[float] = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+            fractions: Sequence[float] = (0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0),
+            baseline: Optional[np.ndarray] = None,
+            normalize: str = "l1",
+            anchor_strategy: str = "mean",
+            eps: float = 1e-12,
+        ) -> Any:
+            engine = fpde.FPDEEngine.fit(X_train, y_train, model=model, baseline=baseline)
+            return engine.select_lambda(
+                X_val,
+                lambda_hyb_grid=lambda_hyb_grid,
+                fractions=fractions,
+                normalize=normalize,
+                anchor_strategy=anchor_strategy,
+                eps=eps,
+            )
+
+        fpde.select_lambda_by_deletion_insertion_validation = select_lambda_by_deletion_insertion_validation
+        fpde.select_hyb_fpde_grid_lambda = select_lambda_by_deletion_insertion_validation
+
+    if not hasattr(fpde, "explain_with_validation_selected_lambda") and hasattr(fpde, "FPDEEngine"):
+        def explain_with_validation_selected_lambda(
+            x: np.ndarray,
+            X_train: np.ndarray,
+            y_train: Sequence[Any],
+            model: Any,
+            selection: Any,
+            *,
+            normalize: str = "l1",
+            anchor_strategy: str = "mean",
+            eps: float = 1e-12,
+        ) -> Tuple[np.ndarray, Dict[str, Any]]:
+            engine = fpde.FPDEEngine.fit(X_train, y_train, model=model)
+            return engine.explain_one(
+                x,
+                lambda_hyb=float(selection.best_lambda),
+                normalize=normalize,
+                anchor_strategy=anchor_strategy,
+                eps=eps,
+            )
+
+        fpde.explain_with_validation_selected_lambda = explain_with_validation_selected_lambda
+
+    required = (
+        "class_mean_prototypes",
+        "top_two_labels",
+        "explain_with_selected_prototypes",
+        "perturbation_curves",
+        "select_lambda_by_deletion_insertion_validation",
+        "explain_with_validation_selected_lambda",
+    )
+    missing = [name for name in required if not hasattr(fpde, name)]
+    if missing:
+        raise ImportError(f"FPDE module is missing required runner API(s): {missing}")
+    return fpde
+
+
 def import_fpde_module(fpde_path: Path):
     fpde_path = fpde_path.expanduser().resolve()
     if not fpde_path.exists():
         raise FileNotFoundError(f"FPDE module not found: {fpde_path}")
+    if fpde_path.suffix == ".whl":
+        wheel_path = str(fpde_path)
+        if wheel_path not in sys.path:
+            sys.path.insert(0, wheel_path)
+        for module_name in [name for name in sys.modules if name == "fpde" or name.startswith("fpde.")]:
+            del sys.modules[module_name]
+        return _add_fpde_runner_compat(importlib.import_module("fpde"))
+
     spec = importlib.util.spec_from_file_location("fpde_core", str(fpde_path))
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load FPDE module from {fpde_path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules["fpde_core"] = module
     spec.loader.exec_module(module)
-    return module
+    return _add_fpde_runner_compat(module)
 
 
 def make_one_hot_encoder():
@@ -936,6 +1011,9 @@ def _mean_abs_nan_safe(values: pd.Series) -> float:
 
 
 def aggregate_results(per_instance: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if per_instance.empty or "status" not in per_instance.columns:
+        return pd.DataFrame(), pd.DataFrame()
+
     ok = per_instance[per_instance["status"] == "ok"].copy()
     if ok.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -1068,7 +1146,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--fractions", type=str, default=FRACTIONS_DEFAULT)
     p.add_argument("--methods", type=str, default=",".join(METHODS_DEFAULT), help="Comma-separated method names.")
     p.add_argument("--output-dir", type=str, default="experimental_outputs")
-    p.add_argument("--fpde-path", type=str, default="FPDE.py", help="Path to FPDE.py. Put it next to this runner or pass an absolute path.")
+    p.add_argument(
+        "--fpde-path",
+        type=str,
+        default=FPDE_WHEEL_DEFAULT,
+        help="Path to the fpde-xai wheel or a legacy FPDE.py module. Relative paths are resolved from the current directory or this runner's directory.",
+    )
     p.add_argument("--n-estimators", type=int, default=100)
     p.add_argument("--learning-rate", type=float, default=0.05)
     p.add_argument("--num-leaves", type=int, default=31)
